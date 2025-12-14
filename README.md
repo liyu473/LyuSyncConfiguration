@@ -20,6 +20,9 @@ LyuSyncConfiguration/
 ├── Events/                 # 事件相关
 │   ├── ConfigurationChangedEventArgs.cs
 │   └── ConfigurationChangeSource.cs
+├── Extensions/             # 扩展方法
+│   ├── SyncConfigurationBuilderExtensions.cs
+│   └── ServiceCollectionExtensions.cs
 ├── Options/                # 配置选项
 │   └── SyncConfigurationOptions.cs
 └── SyncConfig.cs           # 静态工厂入口
@@ -90,6 +93,70 @@ config.ConfigurationChanged += (sender, e) => {
 | `SectionName` | 配置节名称 | `null` |
 | `EnableFileWatcher` | 启用文件监控 | `true` |
 | `JsonOptions` | JSON序列化选项 | - |
+
+## 官方风格配置（IConfigurationBuilder）
+
+```csharp
+var appDirectory = AppContext.BaseDirectory;
+var settingsPath = Path.Combine(appDirectory, "appsettings.json");
+var devSettingsPath = Path.Combine(appDirectory, "appsettings.development.json");
+
+var config = new ConfigurationBuilder()
+    .AddSyncJsonFile(settingsPath, optional: false, reloadOnChange: true)
+    .AddSyncJsonFile(devSettingsPath, optional: true, reloadOnChange: true)
+    .Build();
+
+// 或者使用简化方法
+var config = new ConfigurationBuilder()
+    .AddSyncJsonFiles(appDirectory, "appsettings.json", "development")
+    .Build();
+```
+
+## 依赖注入
+
+```csharp
+// 方式一：使用配置选项
+services.AddSyncConfiguration<AppSettings>(options =>
+{
+    options.FilePath = "appsettings.json";
+    options.Environment = "development";
+    options.SectionName = "AppSettings";
+});
+
+// 方式二：简化版本
+services.AddSyncConfiguration<AppSettings>("appsettings.json", "development");
+
+// 方式三：传入已有的 IConfiguration
+services.AddSyncConfiguration<AppSettings>(configuration, sectionName: "AppSettings");
+```
+
+### 在服务中使用
+
+```csharp
+public class MyService
+{
+    private readonly ISyncConfiguration<AppSettings> _config;
+
+    public MyService(ISyncConfiguration<AppSettings> config)
+    {
+        _config = config;
+
+        // 读取配置
+        var appName = _config.Value.AppName;
+
+        // 修改并保存
+        _config.Update(c => c.AppName = "NewName");
+
+        // 监听变更
+        _config.ConfigurationChanged += OnConfigChanged;
+    }
+
+    private void OnConfigChanged(object? sender, ConfigurationChangedEventArgs<AppSettings> e)
+    {
+        Console.WriteLine($"配置变更: {e.Source}");
+    }
+}
+```
 
 ## 许可证
 
