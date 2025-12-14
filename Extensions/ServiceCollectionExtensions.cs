@@ -64,26 +64,23 @@ public static class ServiceCollectionExtensions
     }
 
     /// <summary>
-    /// 注册同步配置到依赖注入容器（简化版本）
+    /// 注册同步配置到依赖注入容器（简化版本，自动检测环境）
     /// </summary>
     /// <typeparam name="T">配置类型</typeparam>
     /// <param name="services">服务集合</param>
     /// <param name="filePath">配置文件路径</param>
-    /// <param name="environment">环境名称（可选）</param>
     /// <param name="sectionName">配置节名称（可选）</param>
     /// <returns>服务集合</returns>
     public static IServiceCollection AddSyncConfiguration<T>(
         this IServiceCollection services,
         string filePath,
-        string? environment = null,
         string? sectionName = null) where T : class, new()
     {
         services.AddSingleton<ISyncConfiguration<T>>(sp => new SyncConfiguration<T>(new SyncConfigurationOptions
         {
             FilePath = filePath,
-            Environment = environment,
             SectionName = sectionName,
-            EnableFileWatcher = true
+            // AutoDetectEnvironment 默认为 true，会自动检测环境
         }));
 
         return services;
