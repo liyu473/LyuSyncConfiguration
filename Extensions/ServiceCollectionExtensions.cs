@@ -86,6 +86,73 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    #region 简单值同步注入
+
+    /// <summary>
+    /// 注册简单值同步到依赖注入容器
+    /// </summary>
+    /// <typeparam name="T">值类型</typeparam>
+    /// <param name="services">服务集合</param>
+    /// <param name="filePath">配置文件路径</param>
+    /// <param name="key">配置键路径（支持冒号分隔的嵌套路径，如 "Server:Port"）</param>
+    /// <param name="defaultValue">默认值</param>
+    /// <returns>服务集合</returns>
+    public static IServiceCollection AddSyncValue<T>(
+        this IServiceCollection services,
+        string filePath,
+        string key,
+        T defaultValue)
+    {
+        services.AddSingleton<ISyncValue<T>>(sp => new SyncValue<T>(filePath, key, defaultValue));
+        return services;
+    }
+
+    /// <summary>
+    /// 注册简单值同步到依赖注入容器（使用选项配置）
+    /// </summary>
+    /// <typeparam name="T">值类型</typeparam>
+    /// <param name="services">服务集合</param>
+    /// <param name="filePath">配置文件路径</param>
+    /// <param name="key">配置键路径</param>
+    /// <param name="defaultValue">默认值</param>
+    /// <param name="configure">配置选项委托</param>
+    /// <returns>服务集合</returns>
+    public static IServiceCollection AddSyncValue<T>(
+        this IServiceCollection services,
+        string filePath,
+        string key,
+        T defaultValue,
+        Action<SyncConfigurationOptions> configure)
+    {
+        var options = new SyncConfigurationOptions();
+        configure(options);
+        services.AddSingleton<ISyncValue<T>>(sp => new SyncValue<T>(filePath, key, defaultValue, options));
+        return services;
+    }
+
+    /// <summary>
+    /// 注册命名的简单值同步到依赖注入容器（支持同类型多个实例）
+    /// </summary>
+    /// <typeparam name="T">值类型</typeparam>
+    /// <param name="services">服务集合</param>
+    /// <param name="name">服务名称（用于区分同类型的多个实例）</param>
+    /// <param name="filePath">配置文件路径</param>
+    /// <param name="key">配置键路径</param>
+    /// <param name="defaultValue">默认值</param>
+    /// <returns>服务集合</returns>
+    public static IServiceCollection AddKeyedSyncValue<T>(
+        this IServiceCollection services,
+        string name,
+        string filePath,
+        string key,
+        T defaultValue)
+    {
+        services.AddKeyedSingleton<ISyncValue<T>>(name, (sp, _) => new SyncValue<T>(filePath, key, defaultValue));
+        return services;
+    }
+
+    #endregion
+
     private static string GetConfigurationFilePath(IConfiguration configuration)
     {
         // 尝试从 IConfigurationRoot 获取文件路径
