@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LyuSyncConfiguration.Abstractions;
+using LyuSyncConfiguration.Helpers;
 using LyuSyncConfiguration.Options;
 
 namespace LyuSyncConfiguration.Core;
@@ -12,10 +13,12 @@ namespace LyuSyncConfiguration.Core;
 public class SyncValue<T> : ISyncValue<T>
 {
     private readonly string _filePath;
+    private readonly string? _environmentFilePath;
     private readonly string _key;
     private readonly T _defaultValue;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly FileSystemWatcher? _fileWatcher;
+    private readonly FileSystemWatcher? _envFileWatcher;
     private readonly object _writeLock = new();
     private readonly int _saveDebounceMs;
 
@@ -66,12 +69,31 @@ public class SyncValue<T> : ISyncValue<T>
         _jsonOptions = options.JsonOptions;
         _saveDebounceMs = options.SaveDebounceMs;
 
+        // 构建环境配置文件路径
+        var environment = options.Environment;
+        if (string.IsNullOrEmpty(environment) && options.AutoDetectEnvironment)
+        {
+            environment = EnvironmentHelper.GetEnvironment();
+        }
+        
+        if (!string.IsNullOrEmpty(environment))
+        {
+            var directory = Path.GetDirectoryName(_filePath);
+            var fileNameWithoutExt = Path.GetFileNameWithoutExtension(_filePath);
+            var extension = Path.GetExtension(_filePath);
+            _environmentFilePath = Path.Combine(directory ?? "", $"{fileNameWithoutExt}.{environment}{extension}");
+        }
+
         EnsureFileExists();
         LoadFromFile();
 
         if (options.EnableFileWatcher)
         {
-            _fileWatcher = CreateFileWatcher();
+            _fileWatcher = CreateFileWatcher(_filePath);
+            if (_environmentFilePath != null && File.Exists(_environmentFilePath))
+            {
+                _envFileWatcher = CreateFileWatcher(_environmentFilePath);
+            }
         }
     }
 
@@ -99,16 +121,20 @@ public class SyncValue<T> : ISyncValue<T>
 
     private void EnsureFileExists()
     {
-        var directory = Path.GetDirectoryName(_filePath);
+        EnsureSingleFileExists(_filePath);
+    }
+
+    private void EnsureSingleFileExists(string path)
+    {
+        var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
         {
             Directory.CreateDirectory(directory);
         }
 
-        if (!File.Exists(_filePath))
+        if (!File.Exists(path))
         {
-            // 创建包含默认值的文件
-            SaveToFileInternal();
+            File.WriteAllText(path, "{}");
         }
     }
 
@@ -116,22 +142,18 @@ public class SyncValue<T> : ISyncValue<T>
     {
         try
         {
-            var json = File.ReadAllText(_filePath);
-            var root = JsonNode.Parse(json);
-            if (root == null)
-            {
-                _value = _defaultValue;
-                return;
-            }
+            // 先从主配置文件加载
+            _value = LoadValueFromFile(_filePath) ?? _defaultValue;
 
-            var node = GetJsonNode(root, _key);
-            if (node == null)
+            // 如果有环境配置文件，用它覆盖
+            if (_environmentFilePath != null && File.Exists(_environmentFilePath))
             {
-                _value = _defaultValue;
-                return;
+                var envValue = LoadValueFromFile(_environmentFilePath);
+                if (envValue != null)
+                {
+                    _value = envValue;
+                }
             }
-
-            _value = node.Deserialize<T>(_jsonOptions) ?? _defaultValue;
         }
         catch
         {
@@ -139,15 +161,34 @@ public class SyncValue<T> : ISyncValue<T>
         }
     }
 
+    private T? LoadValueFromFile(string filePath)
+    {
+        if (!File.Exists(filePath)) return default;
+        
+        var json = File.ReadAllText(filePath);
+        var root = JsonNode.Parse(json);
+        if (root == null) return default;
+
+        var node = GetJsonNode(root, _key);
+        if (node == null) return default;
+
+        return node.Deserialize<T>(_jsonOptions);
+    }
+
     private void SaveToFileInternal()
     {
         _isSaving = true;
         try
         {
+            // 优先保存到环境配置文件（如果存在），否则保存到主配置文件
+            var targetFilePath = (_environmentFilePath != null && File.Exists(_environmentFilePath))
+                ? _environmentFilePath
+                : _filePath;
+
             JsonNode root;
-            if (File.Exists(_filePath))
+            if (File.Exists(targetFilePath))
             {
-                var existingJson = File.ReadAllText(_filePath);
+                var existingJson = File.ReadAllText(targetFilePath);
                 root = JsonNode.Parse(existingJson) ?? new JsonObject();
             }
             else
@@ -159,7 +200,7 @@ public class SyncValue<T> : ISyncValue<T>
 
             var options = new JsonSerializerOptions(_jsonOptions) { WriteIndented = true };
             var json = root.ToJsonString(options);
-            File.WriteAllText(_filePath, json);
+            File.WriteAllText(targetFilePath, json);
             _lastSaveTime = DateTime.UtcNow;
         }
         finally
@@ -214,10 +255,10 @@ public class SyncValue<T> : ISyncValue<T>
         current[lastPart] = valueNode;
     }
 
-    private FileSystemWatcher CreateFileWatcher()
+    private FileSystemWatcher CreateFileWatcher(string filePath)
     {
-        var directory = Path.GetDirectoryName(_filePath)!;
-        var fileName = Path.GetFileName(_filePath);
+        var directory = Path.GetDirectoryName(filePath)!;
+        var fileName = Path.GetFileName(filePath);
 
         var watcher = new FileSystemWatcher(directory, fileName)
         {
@@ -312,6 +353,7 @@ public class SyncValue<T> : ISyncValue<T>
             }
 
             _fileWatcher?.Dispose();
+            _envFileWatcher?.Dispose();
         }
 
         GC.SuppressFinalize(this);

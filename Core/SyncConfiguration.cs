@@ -230,6 +230,11 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
         _isSaving = true;
         try
         {
+            // 优先保存到环境配置文件（如果存在），否则保存到主配置文件
+            var targetFilePath = (_environmentFilePath != null && File.Exists(_environmentFilePath))
+                ? _environmentFilePath
+                : _filePath;
+
             string json;
             if (string.IsNullOrEmpty(_sectionName))
             {
@@ -237,7 +242,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
             }
             else
             {
-                var existingJson = File.Exists(_filePath) ? File.ReadAllText(_filePath) : "{}";
+                var existingJson = File.Exists(targetFilePath) ? File.ReadAllText(targetFilePath) : "{}";
                 var document = JsonDocument.Parse(existingJson);
                 using var stream = new MemoryStream();
                 using var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true });
@@ -263,7 +268,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
                 json = System.Text.Encoding.UTF8.GetString(stream.ToArray());
             }
 
-            File.WriteAllText(_filePath, json);
+            File.WriteAllText(targetFilePath, json);
             _lastSaveTime = DateTime.UtcNow; // 记录保存时间
         }
         finally
