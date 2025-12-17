@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using LyuSyncConfiguration.Abstractions;
 using LyuSyncConfiguration.Helpers;
 
 namespace LyuSyncConfiguration.Options;
@@ -48,7 +49,26 @@ public class SyncConfigurationOptions
     public bool EnableFileWatcher { get; set; } = true;
 
     /// <summary>
-    /// JSON序列化选项
+    /// 保存防抖延迟时间（毫秒），默认 100ms
+    /// 设为 0 则禁用防抖，每次 Update 立即保存
+    /// </summary>
+    public int SaveDebounceMs { get; set; } = 100;
+
+    /// <summary>
+    /// 克隆序列化器类型（默认 Json）
+    /// - Json: 兼容性好，无需额外配置
+    /// - MemoryPack: 性能更好（快10-50倍），但配置类需要添加 [MemoryPackable] 特性
+    /// </summary>
+    public CloneSerializerType CloneSerializer { get; set; } = CloneSerializerType.Json;
+
+    /// <summary>
+    /// 自定义克隆序列化器（优先级高于 CloneSerializer 枚举）
+    /// 可以实现 ICloneSerializer 接口来自定义克隆逻辑
+    /// </summary>
+    public ICloneSerializer? CustomCloneSerializer { get; set; }
+
+    /// <summary>
+    /// JSON序列化选项（用于文件读写和 JSON 克隆）
     /// </summary>
     public JsonSerializerOptions JsonOptions { get; set; } = new()
     {

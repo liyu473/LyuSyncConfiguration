@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using LyuSyncConfiguration.Abstractions;
 using LyuSyncConfiguration.Options;
+using LyuSyncConfiguration.Serializers;
 
 namespace LyuSyncConfiguration.Core;
 
@@ -17,24 +18,21 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly FileSystemWatcher? _fileWatcher;
     private readonly FileSystemWatcher? _envFileWatcher;
-    private readonly object _lock = new();
+    private readonly Lock _writeLock = new();
+    private readonly int _saveDebounceMs;
+    private readonly ICloneSerializer _cloneSerializer;
 
-    private T _value;
+    private volatile T _value;
     private IConfigurationRoot? _configuration;
     private bool _disposed;
-    private bool _isSaving;
+    private volatile bool _isSaving;
+    private Timer? _saveDebounceTimer;
+    private T? _pendingOldValue;
+    private DateTime _lastSaveTime = DateTime.MinValue;
+    private const int IgnoreFileChangeAfterSaveMs = 500; // 保存后忽略文件变更的时间窗口
 
     /// <inheritdoc/>
-    public T Value
-    {
-        get
-        {
-            lock (_lock)
-            {
-                return _value;
-            }
-        }
-    }
+    public T Value => _value;
 
     /// <inheritdoc/>
     public string FilePath => _filePath;
@@ -51,6 +49,14 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
         _filePath = Path.GetFullPath(options.FilePath);
         _sectionName = options.SectionName;
         _jsonOptions = options.JsonOptions;
+        _saveDebounceMs = options.SaveDebounceMs;
+
+        // 初始化克隆序列化器
+        _cloneSerializer = options.CustomCloneSerializer ?? options.CloneSerializer switch
+        {
+            CloneSerializerType.MemoryPack => new MemoryPackCloneSerializer(),
+            _ => new JsonCloneSerializer(options.JsonOptions)
+        };
 
         // 构建环境配置文件路径
         if (!string.IsNullOrEmpty(options.Environment))
@@ -79,16 +85,16 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
     /// <inheritdoc/>
     public void Save()
     {
-        lock (_lock)
+        lock (_writeLock)
         {
-            SaveToFile();
+            SaveToFileInternal();
         }
     }
 
     /// <inheritdoc/>
     public void Reload()
     {
-        lock (_lock)
+        lock (_writeLock)
         {
             var oldValue = CloneValue(_value);
             LoadFromFile();
@@ -99,13 +105,68 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
     /// <inheritdoc/>
     public void Update(Action<T> updateAction)
     {
-        lock (_lock)
+        lock (_writeLock)
         {
-            var oldValue = CloneValue(_value);
+            // 记录旧值用于事件通知
+            _pendingOldValue ??= CloneValue(_value);
+
             updateAction(_value);
-            SaveToFile();
-            OnConfigurationChanged(oldValue, _value, ConfigurationChangeSource.CodeUpdate);
+
+            // 使用防抖延迟保存
+            ScheduleDebouncedSave();
         }
+    }
+
+    /// <inheritdoc/>
+    public void BatchUpdate(Action<T> updateAction)
+    {
+        Update(updateAction); // 利用防抖机制，批量更新自动合并
+    }
+
+    /// <summary>
+    /// 立即保存，绕过防抖
+    /// </summary>
+    public void SaveImmediate()
+    {
+        lock (_writeLock)
+        {
+            _saveDebounceTimer?.Dispose();
+            _saveDebounceTimer = null;
+            ExecuteSave();
+        }
+    }
+
+    private void ScheduleDebouncedSave()
+    {
+        _saveDebounceTimer?.Dispose();
+
+        if (_saveDebounceMs <= 0)
+        {
+            // 无防抖，立即保存
+            ExecuteSave();
+        }
+        else
+        {
+            _saveDebounceTimer = new Timer(_ =>
+            {
+                lock (_writeLock)
+                {
+                    if (!_disposed)
+                    {
+                        ExecuteSave();
+                    }
+                }
+            }, null, _saveDebounceMs, Timeout.Infinite);
+        }
+    }
+
+    private void ExecuteSave()
+    {
+        var oldValue = _pendingOldValue;
+        _pendingOldValue = null;
+
+        SaveToFileInternal();
+        OnConfigurationChanged(oldValue, _value, ConfigurationChangeSource.CodeUpdate);
     }
 
     private void EnsureFileExists()
@@ -164,7 +225,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
         }
     }
 
-    private void SaveToFile()
+    private void SaveToFileInternal()
     {
         _isSaving = true;
         try
@@ -203,6 +264,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
             }
 
             File.WriteAllText(_filePath, json);
+            _lastSaveTime = DateTime.UtcNow; // 记录保存时间
         }
         finally
         {
@@ -212,8 +274,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
 
     private T? CloneValue(T value)
     {
-        var json = JsonSerializer.Serialize(value, _jsonOptions);
-        return JsonSerializer.Deserialize<T>(json, _jsonOptions);
+        return _cloneSerializer.Clone(value);
     }
 
     private FileSystemWatcher CreateFileWatcher(string filePath)
@@ -234,13 +295,19 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
 
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
+        // 如果正在保存，忽略
         if (_isSaving) return;
+        
+        // 如果在保存后的时间窗口内，忽略（防止自己保存触发的事件）
+        if ((DateTime.UtcNow - _lastSaveTime).TotalMilliseconds < IgnoreFileChangeAfterSaveMs) return;
 
         Task.Delay(100).ContinueWith(_ =>
         {
-            lock (_lock)
+            lock (_writeLock)
             {
+                // 再次检查，防止延迟期间状态变化
                 if (_disposed || _isSaving) return;
+                if ((DateTime.UtcNow - _lastSaveTime).TotalMilliseconds < IgnoreFileChangeAfterSaveMs) return;
 
                 try
                 {
@@ -266,9 +333,18 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
     {
         if (_disposed) return;
 
-        lock (_lock)
+        lock (_writeLock)
         {
             _disposed = true;
+
+            // 如果有待保存的内容，立即保存
+            if (_saveDebounceTimer != null)
+            {
+                _saveDebounceTimer.Dispose();
+                _saveDebounceTimer = null;
+                ExecuteSave();
+            }
+
             _fileWatcher?.Dispose();
             _envFileWatcher?.Dispose();
         }
