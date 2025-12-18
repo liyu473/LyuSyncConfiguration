@@ -36,7 +36,7 @@ jobs:
         run: dotnet build -c Release --no-restore
 
       - name: Pack LyuSyncConfiguration
-        run: dotnet pack LyuSyncConfiguration/LyuSyncConfiguration.csproj -c Release -o ./nupkgs
+        run: dotnet pack ./LyuSyncConfiguration.csproj -c Release -o ./nupkgs
 
       - name: Push LyuSyncConfiguration to NuGet
         if: ${{ !inputs.dry_run }}
