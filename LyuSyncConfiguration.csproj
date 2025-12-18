@@ -10,7 +10,6 @@
 		<Authors>Liyu</Authors>
 		<Description>简化配置文件，实现双向同步</Description>
 		<PackageTags>Configuration</PackageTags>
-		<PackageReadmeFile>README.md</PackageReadmeFile>
 
 		<!-- GitHub 仓库信息 -->
 		<RepositoryUrl>https://github.com/liyu473/LyuSyncConfiguration.git</RepositoryUrl>
