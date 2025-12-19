@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <!-- NuGet 包信息 -->
 		<PackageId>LyuSyncConfiguration</PackageId>
-		<Version>1.0.2</Version>
+		<Version>1.0.3</Version>
 		<Authors>Liyu</Authors>
 		<Description>简化配置文件，实现双向同步</Description>
 		<PackageTags>Configuration</PackageTags>
