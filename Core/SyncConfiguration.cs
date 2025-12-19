@@ -1,8 +1,8 @@
 using System.Text.Json;
-using Microsoft.Extensions.Configuration;
 using LyuSyncConfiguration.Abstractions;
 using LyuSyncConfiguration.Options;
 using LyuSyncConfiguration.Serializers;
+using Microsoft.Extensions.Configuration;
 
 namespace LyuSyncConfiguration.Core;
 
@@ -10,7 +10,8 @@ namespace LyuSyncConfiguration.Core;
 /// 同步配置实现类，支持配置文件与内存的双向同步
 /// </summary>
 /// <typeparam name="T">配置类型</typeparam>
-public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
+public class SyncConfiguration<T> : ISyncConfiguration<T>
+    where T : class, new()
 {
     private readonly string _filePath;
     private readonly string? _environmentFilePath;
@@ -18,7 +19,12 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly FileSystemWatcher? _fileWatcher;
     private readonly FileSystemWatcher? _envFileWatcher;
+#if NET9_0_OR_GREATER
     private readonly Lock _writeLock = new();
+#else
+    private readonly object _writeLock = new();
+#endif
+
     private readonly int _saveDebounceMs;
     private readonly ICloneSerializer _cloneSerializer;
 
@@ -52,11 +58,13 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
         _saveDebounceMs = options.SaveDebounceMs;
 
         // 初始化克隆序列化器
-        _cloneSerializer = options.CustomCloneSerializer ?? options.CloneSerializer switch
-        {
-            CloneSerializerType.MemoryPack => new MemoryPackCloneSerializer(),
-            _ => new JsonCloneSerializer(options.JsonOptions)
-        };
+        _cloneSerializer =
+            options.CustomCloneSerializer
+            ?? options.CloneSerializer switch
+            {
+                CloneSerializerType.MemoryPack => new MemoryPackCloneSerializer(),
+                _ => new JsonCloneSerializer(options.JsonOptions),
+            };
 
         // 构建环境配置文件路径
         if (!string.IsNullOrEmpty(options.Environment))
@@ -64,7 +72,10 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
             var directory = Path.GetDirectoryName(_filePath);
             var fileNameWithoutExt = Path.GetFileNameWithoutExtension(_filePath);
             var extension = Path.GetExtension(_filePath);
-            _environmentFilePath = Path.Combine(directory ?? "", $"{fileNameWithoutExt}.{options.Environment}{extension}");
+            _environmentFilePath = Path.Combine(
+                directory ?? "",
+                $"{fileNameWithoutExt}.{options.Environment}{extension}"
+            );
         }
 
         _value = new T();
@@ -147,16 +158,21 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
         }
         else
         {
-            _saveDebounceTimer = new Timer(_ =>
-            {
-                lock (_writeLock)
+            _saveDebounceTimer = new Timer(
+                _ =>
                 {
-                    if (!_disposed)
+                    lock (_writeLock)
                     {
-                        ExecuteSave();
+                        if (!_disposed)
+                        {
+                            ExecuteSave();
+                        }
                     }
-                }
-            }, null, _saveDebounceMs, Timeout.Infinite);
+                },
+                null,
+                _saveDebounceMs,
+                Timeout.Infinite
+            );
         }
     }
 
@@ -210,7 +226,11 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
 
         if (_environmentFilePath != null)
         {
-            builder.AddJsonFile(Path.GetFileName(_environmentFilePath), optional: true, reloadOnChange: false);
+            builder.AddJsonFile(
+                Path.GetFileName(_environmentFilePath),
+                optional: true,
+                reloadOnChange: false
+            );
         }
 
         _configuration = builder.Build();
@@ -231,9 +251,10 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
         try
         {
             // 优先保存到环境配置文件（如果存在），否则保存到主配置文件
-            var targetFilePath = (_environmentFilePath != null && File.Exists(_environmentFilePath))
-                ? _environmentFilePath
-                : _filePath;
+            var targetFilePath =
+                (_environmentFilePath != null && File.Exists(_environmentFilePath))
+                    ? _environmentFilePath
+                    : _filePath;
 
             string json;
             if (string.IsNullOrEmpty(_sectionName))
@@ -242,10 +263,15 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
             }
             else
             {
-                var existingJson = File.Exists(targetFilePath) ? File.ReadAllText(targetFilePath) : "{}";
+                var existingJson = File.Exists(targetFilePath)
+                    ? File.ReadAllText(targetFilePath)
+                    : "{}";
                 var document = JsonDocument.Parse(existingJson);
                 using var stream = new MemoryStream();
-                using var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true });
+                using var writer = new Utf8JsonWriter(
+                    stream,
+                    new JsonWriterOptions { Indented = true }
+                );
 
                 writer.WriteStartObject();
 
@@ -290,7 +316,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
         var watcher = new FileSystemWatcher(directory, fileName)
         {
             NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
-            EnableRaisingEvents = true
+            EnableRaisingEvents = true,
         };
 
         watcher.Changed += OnFileChanged;
@@ -301,42 +327,58 @@ public class SyncConfiguration<T> : ISyncConfiguration<T> where T : class, new()
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
         // 如果正在保存，忽略
-        if (_isSaving) return;
-        
+        if (_isSaving)
+            return;
+
         // 如果在保存后的时间窗口内，忽略（防止自己保存触发的事件）
-        if ((DateTime.UtcNow - _lastSaveTime).TotalMilliseconds < IgnoreFileChangeAfterSaveMs) return;
+        if ((DateTime.UtcNow - _lastSaveTime).TotalMilliseconds < IgnoreFileChangeAfterSaveMs)
+            return;
 
-        Task.Delay(100).ContinueWith(_ =>
-        {
-            lock (_writeLock)
+        Task.Delay(100)
+            .ContinueWith(_ =>
             {
-                // 再次检查，防止延迟期间状态变化
-                if (_disposed || _isSaving) return;
-                if ((DateTime.UtcNow - _lastSaveTime).TotalMilliseconds < IgnoreFileChangeAfterSaveMs) return;
+                lock (_writeLock)
+                {
+                    // 再次检查，防止延迟期间状态变化
+                    if (_disposed || _isSaving)
+                        return;
+                    if (
+                        (DateTime.UtcNow - _lastSaveTime).TotalMilliseconds
+                        < IgnoreFileChangeAfterSaveMs
+                    )
+                        return;
 
-                try
-                {
-                    var oldValue = CloneValue(_value);
-                    LoadFromFile();
-                    OnConfigurationChanged(oldValue, _value, ConfigurationChangeSource.FileWatch);
+                    try
+                    {
+                        var oldValue = CloneValue(_value);
+                        LoadFromFile();
+                        OnConfigurationChanged(
+                            oldValue,
+                            _value,
+                            ConfigurationChangeSource.FileWatch
+                        );
+                    }
+                    catch
+                    {
+                        // 忽略加载错误，保持当前配置
+                    }
                 }
-                catch
-                {
-                    // 忽略加载错误，保持当前配置
-                }
-            }
-        });
+            });
     }
 
     private void OnConfigurationChanged(T? oldValue, T newValue, ConfigurationChangeSource source)
     {
-        ConfigurationChanged?.Invoke(this, new ConfigurationChangedEventArgs<T>(oldValue, newValue, source));
+        ConfigurationChanged?.Invoke(
+            this,
+            new ConfigurationChangedEventArgs<T>(oldValue, newValue, source)
+        );
     }
 
     /// <inheritdoc/>
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+            return;
 
         lock (_writeLock)
         {
