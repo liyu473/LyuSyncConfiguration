@@ -151,6 +151,31 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>
+    /// 注册命名的简单值同步到依赖注入容器（使用选项配置，支持同类型多个实例）
+    /// </summary>
+    /// <typeparam name="T">值类型</typeparam>
+    /// <param name="services">服务集合</param>
+    /// <param name="name">服务名称（用于区分同类型的多个实例）</param>
+    /// <param name="filePath">配置文件路径</param>
+    /// <param name="key">配置键路径</param>
+    /// <param name="defaultValue">默认值</param>
+    /// <param name="configure">配置选项委托</param>
+    /// <returns>服务集合</returns>
+    public static IServiceCollection AddKeyedSyncValue<T>(
+        this IServiceCollection services,
+        string name,
+        string filePath,
+        string key,
+        T defaultValue,
+        Action<SyncConfigurationOptions> configure)
+    {
+        var options = new SyncConfigurationOptions();
+        configure(options);
+        services.AddKeyedSingleton<ISyncValue<T>>(name, (sp, _) => new SyncValue<T>(filePath, key, defaultValue, options));
+        return services;
+    }
+
     #endregion
 
     private static string GetConfigurationFilePath(IConfiguration configuration)
