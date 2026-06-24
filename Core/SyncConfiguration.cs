@@ -1,4 +1,5 @@
-using System.Text.Json;
+﻿using System.Text.Json;
+using System.Text.Json.Nodes;
 using LyuSyncConfiguration.Abstractions;
 using LyuSyncConfiguration.Options;
 using LyuSyncConfiguration.Serializers;
@@ -7,7 +8,7 @@ using Microsoft.Extensions.Configuration;
 namespace LyuSyncConfiguration.Core;
 
 /// <summary>
-/// 同步配置实现类，支持配置文件与内存的双向同步
+/// 同步配置实现类，支持配置文件与内存的双向同步。
 /// </summary>
 /// <typeparam name="T">配置类型</typeparam>
 public class SyncConfiguration<T> : ISyncConfiguration<T>
@@ -35,7 +36,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
     private Timer? _saveDebounceTimer;
     private T? _pendingOldValue;
     private DateTime _lastSaveTime = DateTime.MinValue;
-    private const int IgnoreFileChangeAfterSaveMs = 500; // 保存后忽略文件变更的时间窗口
+    private const int IgnoreFileChangeAfterSaveMs = 500; // 保存后忽略文件变化的时间窗口
 
     /// <inheritdoc/>
     public T Value => _value;
@@ -47,7 +48,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
     public event EventHandler<ConfigurationChangedEventArgs<T>>? ConfigurationChanged;
 
     /// <summary>
-    /// 创建同步配置实例
+    /// 创建同步配置实例。
     /// </summary>
     /// <param name="options">配置选项</param>
     public SyncConfiguration(SyncConfigurationOptions options)
@@ -73,7 +74,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
             var fileNameWithoutExt = Path.GetFileNameWithoutExtension(_filePath);
             var extension = Path.GetExtension(_filePath);
             _environmentFilePath = Path.Combine(
-                directory ?? "",
+                directory ?? string.Empty,
                 $"{fileNameWithoutExt}.{options.Environment}{extension}"
             );
         }
@@ -131,11 +132,28 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
     /// <inheritdoc/>
     public void BatchUpdate(Action<T> updateAction)
     {
-        Update(updateAction); // 利用防抖机制，批量更新自动合并
+        Update(updateAction); // 利用防抖机制，批量更新自动合并保存
+    }
+
+    /// <inheritdoc/>
+    public void UpdateFragment<TValue>(string keyPath, TValue value)
+    {
+        if (string.IsNullOrWhiteSpace(keyPath))
+        {
+            throw new ArgumentException("片段路径不能为空。", nameof(keyPath));
+        }
+
+        lock (_writeLock)
+        {
+            var oldValue = CloneValue(_value);
+            SaveFragmentToFileInternal(keyPath, value);
+            LoadFromFile();
+            OnConfigurationChanged(oldValue, _value, ConfigurationChangeSource.CodeUpdate);
+        }
     }
 
     /// <summary>
-    /// 立即保存，绕过防抖
+    /// 立即保存，绕过防抖。
     /// </summary>
     public void SaveImmediate()
     {
@@ -251,10 +269,7 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
         try
         {
             // 优先保存到环境配置文件（如果存在），否则保存到主配置文件
-            var targetFilePath =
-                (_environmentFilePath != null && File.Exists(_environmentFilePath))
-                    ? _environmentFilePath
-                    : _filePath;
+            var targetFilePath = ResolveTargetFilePath();
 
             string json;
             if (string.IsNullOrEmpty(_sectionName))
@@ -270,7 +285,11 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
                 using var stream = new MemoryStream();
                 using var writer = new Utf8JsonWriter(
                     stream,
-                    new JsonWriterOptions { Indented = true }
+                    new JsonWriterOptions
+                    {
+                        Indented = true,
+                        Encoder = _jsonOptions.Encoder
+                    }
                 );
 
                 writer.WriteStartObject();
@@ -303,6 +322,133 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
         }
     }
 
+    private void SaveFragmentToFileInternal<TValue>(string keyPath, TValue value)
+    {
+        _isSaving = true;
+        try
+        {
+            var targetFilePath = ResolveTargetFilePath();
+            var existingJson = File.Exists(targetFilePath)
+                ? File.ReadAllText(targetFilePath)
+                : "{}";
+
+            JsonNode root = JsonNode.Parse(existingJson) ?? new JsonObject();
+            JsonNode currentRoot = GetOrCreateSectionRoot(root);
+            SetJsonNode(currentRoot, keyPath, value);
+
+            var options = new JsonSerializerOptions(_jsonOptions)
+            {
+                WriteIndented = true
+            };
+
+            var json = root.ToJsonString(options);
+            File.WriteAllText(targetFilePath, json);
+            _lastSaveTime = DateTime.UtcNow;
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private string ResolveTargetFilePath()
+    {
+        return (_environmentFilePath != null && File.Exists(_environmentFilePath))
+            ? _environmentFilePath
+            : _filePath;
+    }
+
+    private JsonNode GetOrCreateSectionRoot(JsonNode root)
+    {
+        if (string.IsNullOrEmpty(_sectionName))
+        {
+            return root;
+        }
+
+        if (root is not JsonObject rootObject)
+        {
+            throw new InvalidOperationException("根节点必须是 JSON 对象。");
+        }
+
+        if (rootObject[_sectionName] is null)
+        {
+            rootObject[_sectionName] = new JsonObject();
+        }
+
+        return rootObject[_sectionName]!;
+    }
+
+    private void SetJsonNode<TValue>(JsonNode root, string keyPath, TValue value)
+    {
+        var parts = keyPath.Split(':', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+        {
+            throw new ArgumentException("片段路径不能为空。", nameof(keyPath));
+        }
+
+        JsonNode current = root;
+
+        for (var i = 0; i < parts.Length - 1; i++)
+        {
+            var part = parts[i];
+            var nextPart = parts[i + 1];
+            var nextShouldBeArray = int.TryParse(nextPart, out _);
+
+            if (int.TryParse(part, out var arrayIndex))
+            {
+                if (current is not JsonArray currentArray)
+                {
+                    throw new InvalidOperationException($"路径片段 {part} 期望数组节点。");
+                }
+
+                EnsureArraySize(currentArray, arrayIndex);
+                currentArray[arrayIndex] ??= nextShouldBeArray ? new JsonArray() : new JsonObject();
+                current = currentArray[arrayIndex]!;
+            }
+            else
+            {
+                if (current is not JsonObject currentObject)
+                {
+                    throw new InvalidOperationException($"路径片段 {part} 期望对象节点。");
+                }
+
+                currentObject[part] ??= nextShouldBeArray ? new JsonArray() : new JsonObject();
+                current = currentObject[part]!;
+            }
+        }
+
+        var lastPart = parts[^1];
+        var valueNode = JsonSerializer.SerializeToNode(value, _jsonOptions);
+
+        if (int.TryParse(lastPart, out var lastIndex))
+        {
+            if (current is not JsonArray currentArray)
+            {
+                throw new InvalidOperationException($"路径片段 {lastPart} 期望数组节点。");
+            }
+
+            EnsureArraySize(currentArray, lastIndex);
+            currentArray[lastIndex] = valueNode;
+        }
+        else
+        {
+            if (current is not JsonObject currentObject)
+            {
+                throw new InvalidOperationException($"路径片段 {lastPart} 期望对象节点。");
+            }
+
+            currentObject[lastPart] = valueNode;
+        }
+    }
+
+    private static void EnsureArraySize(JsonArray array, int index)
+    {
+        while (array.Count <= index)
+        {
+            array.Add(null);
+        }
+    }
+
     private T? CloneValue(T value)
     {
         return _cloneSerializer.Clone(value);
@@ -315,26 +461,34 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
 
         var watcher = new FileSystemWatcher(directory, fileName)
         {
-            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
+            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
             EnableRaisingEvents = true,
         };
 
         watcher.Changed += OnFileChanged;
+        watcher.Created += OnFileChanged;
+        watcher.Deleted += OnFileChanged;
+        watcher.Renamed += OnFileRenamed;
 
         return watcher;
     }
 
+    private void OnFileRenamed(object sender, RenamedEventArgs e)
+    {
+        OnFileChanged(sender, e);
+    }
+
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
-        // 如果正在保存，忽略
+        // 如果正在保存，忽略本次变化
         if (_isSaving)
             return;
 
-        // 如果在保存后的时间窗口内，忽略（防止自己保存触发的事件）
+        // 如果处于保存后的时间窗口内，忽略本次变化，避免自己保存触发事件
         if ((DateTime.UtcNow - _lastSaveTime).TotalMilliseconds < IgnoreFileChangeAfterSaveMs)
             return;
 
-        Task.Delay(100)
+        Task.Delay(300)
             .ContinueWith(_ =>
             {
                 lock (_writeLock)
