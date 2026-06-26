@@ -506,6 +506,10 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
                     {
                         var oldValue = CloneValue(_value);
                         LoadFromFile();
+
+                        if (AreValuesEqual(oldValue, _value))
+                            return;
+
                         OnConfigurationChanged(
                             oldValue,
                             _value,
@@ -518,6 +522,16 @@ public class SyncConfiguration<T> : ISyncConfiguration<T>
                     }
                 }
             });
+    }
+
+    private bool AreValuesEqual(T? oldValue, T newValue)
+    {
+        if (oldValue is null)
+            return false;
+
+        var oldJson = JsonSerializer.Serialize(oldValue, _jsonOptions);
+        var newJson = JsonSerializer.Serialize(newValue, _jsonOptions);
+        return string.Equals(oldJson, newJson, StringComparison.Ordinal);
     }
 
     private void OnConfigurationChanged(T? oldValue, T newValue, ConfigurationChangeSource source)
